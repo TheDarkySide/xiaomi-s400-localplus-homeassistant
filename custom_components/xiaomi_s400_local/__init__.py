@@ -21,7 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: S400ConfigEntry) -> bool
         hass,
         entry.data["address"],
         bytes.fromhex(entry.data[CONF_BINDKEY]),
-        bytes.fromhex(token_hex) if token_hex else None,
+        None,  # Always use passive mode for heart rate reliability
     )
     entry.runtime_data = coordinator
     coordinator.start()

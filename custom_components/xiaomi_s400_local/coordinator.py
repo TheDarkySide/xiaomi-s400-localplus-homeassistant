@@ -163,6 +163,8 @@ class S400Coordinator:
     @callback
     def _start_active_session(self) -> None:
         """Connect after an advertisement shows that the scale is awake."""
+        # Always use passive mode for heart rate broadcast reliability
+        return
         if not self.token or (self._active_task and not self._active_task.done()):
             return
         now = time.monotonic()
