@@ -16,7 +16,6 @@ type S400ConfigEntry = ConfigEntry[S400Coordinator]
 
 async def async_setup_entry(hass: HomeAssistant, entry: S400ConfigEntry) -> bool:
     """Start passive local reception for one S400."""
-    token_hex = entry.data.get(CONF_TOKEN, "")
     coordinator = S400Coordinator(
         hass,
         entry.data["address"],
@@ -24,7 +23,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: S400ConfigEntry) -> bool
         None,  # Always use passive mode for heart rate reliability
     )
     entry.runtime_data = coordinator
-    coordinator.start()
+    coordinator.start(entry)
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except Exception:

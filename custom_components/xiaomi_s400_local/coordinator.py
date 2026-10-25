@@ -56,11 +56,13 @@ class S400Coordinator:
             "mibeacon_version": None,
         }
         self._listeners: set[Callable[[], None]] = set()
-        self._cancel: CALLBACK_TYPE | None = None
+        self._cancel_callbacks: list[CALLBACK_TYPE] = []
         self._poll_task: Task[None] | None = None
         self._stopped = False
         self._last_raw_seen: bytes | None = None
         self._last_time_seen: float = 0.0
+        self._last_obj_raw: bytes | None = None
+        self._last_obj_time: float = 0.0
         self.last_error: str | None = None
         self.debug_events: deque[str] = deque(maxlen=120)
 
@@ -69,29 +71,37 @@ class S400Coordinator:
         self.debug_events.append(f"[{ts}] {msg}")
         _LOGGER.warning("[S400 %s] %s", self.address, msg)
 
-    def start(self) -> None:
-        """Register passive/active Bluetooth callback without connectable=False filter."""
+    def start(self, entry: Any | None = None) -> None:
+        """Register passive/active Bluetooth callbacks for connectable and non-connectable."""
         self._stopped = False
-        self._log_event("Coordinator start (PASSIVE FE95 mode, connectable=Any)")
-        self._cancel = bluetooth.async_register_callback(
-            self.hass,
-            self._advertisement,
-            BluetoothCallbackMatcher(
-                address=self.address,
-                service_data_uuid=MIBEACON_UUID,
-            ),
-            BluetoothScanningMode.ACTIVE,
-        )
-        self._poll_task = self.hass.async_create_task(
-            self._poll_service_info_loop(), f"S400 adv poll {self.address}"
-        )
+        self._log_event("Coordinator start (Dual-mode connectable=True/False, ScanningMode=ACTIVE)")
+        self._cancel_callbacks = []
+        for conn in (True, False):
+            cancel = bluetooth.async_register_callback(
+                self.hass,
+                self._advertisement,
+                BluetoothCallbackMatcher(
+                    address=self.address,
+                    connectable=conn,
+                ),
+                BluetoothScanningMode.ACTIVE,
+            )
+            self._cancel_callbacks.append(cancel)
+
+        if entry is not None and hasattr(entry, "async_create_background_task"):
+            self._poll_task = entry.async_create_background_task(
+                self.hass, self._poll_service_info_loop(), f"S400 adv poll {self.address}"
+            )
+        else:
+            self._poll_task = asyncio.create_task(self._poll_service_info_loop())
 
     async def stop(self) -> None:
-        """Remove the Bluetooth callback."""
+        """Remove the Bluetooth callbacks."""
         self._stopped = True
-        if self._cancel:
-            self._cancel()
-            self._cancel = None
+        if self._cancel_callbacks:
+            for cancel in self._cancel_callbacks:
+                cancel()
+            self._cancel_callbacks.clear()
         if self._poll_task:
             self._poll_task.cancel()
             with suppress(CancelledError):
@@ -112,10 +122,11 @@ class S400Coordinator:
                     if raw is None:
                         continue
                     info_time = getattr(info, "time", 0.0) or 0.0
-                    if raw != self._last_raw_seen or (
-                        info_time > self._last_time_seen and len(raw) > 11
-                    ):
-                        self._advertisement(info, BluetoothChange.ADVERTISEMENT)
+                    if len(raw) > 11:
+                        if raw != self._last_obj_raw or info_time > self._last_obj_time:
+                            self._last_obj_raw = raw
+                            self._last_obj_time = info_time
+                            self._advertisement(info, BluetoothChange.ADVERTISEMENT)
             except Exception as err:
                 self._log_event(f"Poll err: {err}")
             await asyncio.sleep(0.4)
@@ -139,9 +150,9 @@ class S400Coordinator:
             return
         info_time = getattr(service_info, "time", 0.0) or 0.0
         if (
-            raw == self._last_raw_seen
-            and (info_time - self._last_time_seen) < 2.0
-            and len(raw) == 11
+            len(raw) == 11
+            and raw == self._last_raw_seen
+            and (info_time - self._last_time_seen) < 3.0
         ):
             return
         self._last_raw_seen = raw
