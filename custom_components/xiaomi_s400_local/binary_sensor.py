@@ -49,4 +49,4 @@ class S400GattConnected(S400Entity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        return bool(self.coordinator.values["gatt_connected"])
+        return False

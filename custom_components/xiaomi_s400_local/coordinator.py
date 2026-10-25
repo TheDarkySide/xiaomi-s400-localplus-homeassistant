@@ -176,13 +176,8 @@ class S400Coordinator:
         )
 
     async def _active_session(self) -> None:
-        """Log in and consume automatic measurements until disconnection."""
-        device = bluetooth.async_ble_device_from_address(
-            self.hass, self.address, connectable=True
-        )
-        if device is None or self.token is None:
-            return
-        client: BleakClient | None = None
+        """Disabled: Passive BLE broadcast mode is enforced for heart rate and impedance."""
+        return
         try:
             client = await establish_connection(
                 BleakClient,
