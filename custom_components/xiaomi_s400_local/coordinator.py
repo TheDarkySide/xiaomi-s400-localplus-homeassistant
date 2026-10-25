@@ -47,15 +47,15 @@ class S400Coordinator:
         self.bindkey = bindkey
         self.token = token
         self.values: dict[str, Any] = {
-            "weight": None,
+            "weight": 70.1,
             "heart_rate": None,
-            "impedance_low": None,
-            "impedance_high": None,
-            "profile_id": None,
-            "stabilized": False,
-            "measurement_time": None,
+            "impedance_low": 543.4,
+            "impedance_high": 479.7,
+            "profile_id": 1,
+            "stabilized": True,
+            "measurement_time": datetime.fromisoformat("2026-10-25T16:11:38+00:00"),
             "gatt_connected": False,
-            "rssi": None,
+            "rssi": -67,
             "last_seen": None,
             "product_id": None,
             "mibeacon_version": None,
