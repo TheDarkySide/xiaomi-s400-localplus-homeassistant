@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections import deque
 import logging
-import time
-from asyncio import CancelledError, Task, wait_for
+from asyncio import CancelledError, Task
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
-from bleak import BleakClient
-from bleak_retry_connector import establish_connection
-from cryptography.exceptions import InvalidTag
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import (
     BluetoothCallbackMatcher,
@@ -23,11 +21,8 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 
-from .active import CmtpFrames, decode_cmtp
 from .const import MIBEACON_UUID
-from .pairing import _GattTransport, _login
 from .parser import AdvertisementError, parse_mibeacon
-from .protocol import CMTP, RCV_OK, RCV_RDY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,48 +42,83 @@ class S400Coordinator:
         self.bindkey = bindkey
         self.token = token
         self.values: dict[str, Any] = {
-            "weight": 70.1,
+            "weight": None,
             "heart_rate": None,
-            "impedance_low": 543.4,
-            "impedance_high": 479.7,
-            "profile_id": 1,
+            "impedance_low": None,
+            "impedance_high": None,
+            "profile_id": None,
             "stabilized": True,
-            "measurement_time": datetime.fromisoformat("2026-10-25T16:11:38+00:00"),
+            "measurement_time": None,
             "gatt_connected": False,
-            "rssi": -67,
+            "rssi": None,
             "last_seen": None,
             "product_id": None,
             "mibeacon_version": None,
         }
         self._listeners: set[Callable[[], None]] = set()
         self._cancel: CALLBACK_TYPE | None = None
-        self._active_task: Task[None] | None = None
-        self._last_active_attempt = 0.0
+        self._poll_task: Task[None] | None = None
+        self._stopped = False
+        self._last_raw_seen: bytes | None = None
+        self._last_time_seen: float = 0.0
         self.last_error: str | None = None
+        self.debug_events: deque[str] = deque(maxlen=120)
+
+    def _log_event(self, msg: str) -> None:
+        ts = datetime.now(UTC).strftime("%H:%M:%S.%f")[:-3]
+        self.debug_events.append(f"[{ts}] {msg}")
+        _LOGGER.warning("[S400 %s] %s", self.address, msg)
 
     def start(self) -> None:
-        """Register a passive Bluetooth callback."""
+        """Register passive/active Bluetooth callback without connectable=False filter."""
+        self._stopped = False
+        self._log_event("Coordinator start (PASSIVE FE95 mode, connectable=Any)")
         self._cancel = bluetooth.async_register_callback(
             self.hass,
             self._advertisement,
             BluetoothCallbackMatcher(
                 address=self.address,
                 service_data_uuid=MIBEACON_UUID,
-                connectable=False,
             ),
-            BluetoothScanningMode.PASSIVE,
+            BluetoothScanningMode.ACTIVE,
+        )
+        self._poll_task = self.hass.async_create_task(
+            self._poll_service_info_loop(), f"S400 adv poll {self.address}"
         )
 
     async def stop(self) -> None:
         """Remove the Bluetooth callback."""
+        self._stopped = True
         if self._cancel:
             self._cancel()
             self._cancel = None
-        if self._active_task:
-            self._active_task.cancel()
+        if self._poll_task:
+            self._poll_task.cancel()
             with suppress(CancelledError):
-                await self._active_task
-            self._active_task = None
+                await self._poll_task
+            self._poll_task = None
+
+    async def _poll_service_info_loop(self) -> None:
+        """Poll habluetooth service_info every 0.4s so no FE95 frame is missed."""
+        while not self._stopped:
+            try:
+                for conn in (True, False):
+                    info = bluetooth.async_last_service_info(
+                        self.hass, self.address, connectable=conn
+                    )
+                    if info is None:
+                        continue
+                    raw = info.service_data.get(MIBEACON_UUID)
+                    if raw is None:
+                        continue
+                    info_time = getattr(info, "time", 0.0) or 0.0
+                    if raw != self._last_raw_seen or (
+                        info_time > self._last_time_seen and len(raw) > 11
+                    ):
+                        self._advertisement(info, BluetoothChange.ADVERTISEMENT)
+            except Exception as err:
+                self._log_event(f"Poll err: {err}")
+            await asyncio.sleep(0.4)
 
     @callback
     def add_listener(self, listener: Callable[[], None]) -> CALLBACK_TYPE:
@@ -107,15 +137,31 @@ class S400Coordinator:
         raw = service_info.service_data.get(MIBEACON_UUID)
         if raw is None:
             return
-        self._start_active_session()
+        info_time = getattr(service_info, "time", 0.0) or 0.0
+        if (
+            raw == self._last_raw_seen
+            and (info_time - self._last_time_seen) < 2.0
+            and len(raw) == 11
+        ):
+            return
+        self._last_raw_seen = raw
+        self._last_time_seen = info_time
+        self._log_event(
+            f"ADV rssi={service_info.rssi} src={service_info.source} conn={service_info.connectable} len={len(raw)} hex={raw.hex()}"
+        )
         try:
             update = parse_mibeacon(self.address, raw, self.bindkey)
         except AdvertisementError as err:
             self.last_error = str(err)
-            _LOGGER.debug("Discarding S400 advertisement: %s", err)
+            self._log_event(f"FE95 err: {err}")
             return
         self.last_error = None
         parsed = asdict(update)
+        if len(raw) > 11 or any(
+            parsed.get(k) is not None
+            for k in ("weight", "heart_rate", "impedance_low", "impedance_high")
+        ):
+            self._log_event(f"FE95 decoded: {parsed}")
         if parsed["weight"] is not None and parsed["stabilized"] is False:
             self._start_measurement()
         for key in (
@@ -161,126 +207,6 @@ class S400Coordinator:
         self.values["stabilized"] = False
 
     @callback
-    def _start_active_session(self) -> None:
-        """Connect after an advertisement shows that the scale is awake."""
-        # Always use passive mode for heart rate broadcast reliability
-        return
-        if not self.token or (self._active_task and not self._active_task.done()):
-            return
-        now = time.monotonic()
-        if now - self._last_active_attempt < 15:
-            return
-        self._last_active_attempt = now
-        self._active_task = self.hass.async_create_task(
-            self._active_session(), f"S400 active measurement {self.address}"
-        )
-
-    async def _active_session(self) -> None:
-        """Disabled: Passive BLE broadcast mode is enforced for heart rate and impedance."""
-        return
-        try:
-            client = await establish_connection(
-                BleakClient,
-                device,
-                f"Xiaomi S400 {self.address}",
-            )
-            transport = _GattTransport(client, _NoTrace(), timeout=8.0)
-            await transport.start_official_order()
-            await transport.official_init()
-            await transport.finish_subscriptions()
-            keys = await _login(transport, self.token)
-            self.last_error = None
-            self.values["gatt_connected"] = True
-            self._notify_listeners()
-            frames = CmtpFrames()
-            queue = transport.queues[CMTP]
-            while client.is_connected:
-                try:
-                    data = await wait_for(queue.get(), timeout=5.0)
-                except TimeoutError:
-                    continue
-                if len(data) >= 6 and data[:3] == b"\x00\x00\x00":
-                    try:
-                        frames.start(data)
-                    except ValueError:
-                        frames = CmtpFrames()
-                        continue
-                    await transport.write(CMTP, RCV_RDY)
-                    continue
-                if not frames.expected:
-                    continue
-                try:
-                    complete = frames.add(data)
-                except ValueError:
-                    frames = CmtpFrames()
-                    continue
-                if complete is None:
-                    continue
-                await transport.write(CMTP, RCV_OK)
-                try:
-                    measurement = decode_cmtp(keys, complete)
-                except (InvalidTag, ValueError):
-                    _LOGGER.debug("Discarding unauthenticated S400 CMTP frame")
-                    continue
-                if measurement is not None:
-                    self._apply_active_measurement(measurement)
-                    if measurement.stabilized and (
-                        measurement.impedance_low is not None
-                        or measurement.impedance_high is not None
-                        or measurement.heart_rate is not None
-                    ):
-                        _LOGGER.debug("S400 measurement finalized with impedance/heart rate, concluding active GATT session")
-                        break
-        except CancelledError:
-            raise
-        except Exception as err:
-            self.last_error = f"active GATT: {type(err).__name__}"
-            _LOGGER.debug("S400 active session ended: %s", type(err).__name__)
-            self._notify_listeners()
-        finally:
-            self.values["gatt_connected"] = False
-            self._notify_listeners()
-            if client and client.is_connected:
-                with suppress(Exception):
-                    await client.disconnect()
-
-    @callback
-    def _apply_active_measurement(self, measurement: Any) -> None:
-        if measurement.timestamp is not None and self.values["measurement_time"]:
-            previous = self.values["measurement_time"].timestamp()
-            if abs(measurement.timestamp - previous) > 15:
-                self.values["stabilized"] = True
-                self._start_measurement()
-        if measurement.weight is not None and not measurement.stabilized:
-            self._start_measurement()
-        for key in (
-            "weight",
-            "heart_rate",
-            "impedance_low",
-            "impedance_high",
-            "profile_id",
-        ):
-            value = getattr(measurement, key, None)
-            if value is not None:
-                self.values[key] = value
-        self.values["stabilized"] = measurement.stabilized
-        if measurement.timestamp is not None:
-            with suppress(OverflowError, OSError, ValueError):
-                self.values["measurement_time"] = datetime.fromtimestamp(
-                    measurement.timestamp, UTC
-                )
-        self.values["last_seen"] = datetime.now(UTC)
-        self.last_error = None
-        self._notify_listeners()
-
-    @callback
     def _notify_listeners(self) -> None:
         for listener in tuple(self._listeners):
             listener()
-
-
-class _NoTrace:
-    """Drop protocol trace events during normal Home Assistant operation."""
-
-    def record(self, event: str, **values: Any) -> None:
-        """Intentionally avoid logging protocol payloads or secrets."""

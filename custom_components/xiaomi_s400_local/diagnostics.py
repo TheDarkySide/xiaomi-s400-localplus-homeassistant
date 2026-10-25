@@ -25,4 +25,5 @@ async def async_get_config_entry_diagnostics(
             for key, value in coordinator.values.items()
         },
         "last_error": coordinator.last_error,
+        "debug_events": list(getattr(coordinator, "debug_events", [])),
     }
