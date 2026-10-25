@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
-    SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
 )
@@ -90,7 +92,7 @@ async def async_setup_entry(
     )
 
 
-class S400Sensor(S400Entity, SensorEntity):
+class S400Sensor(S400Entity, RestoreSensor):
     """One decoded measurement field."""
 
     entity_description: S400SensorDescription
@@ -103,7 +105,32 @@ class S400Sensor(S400Entity, SensorEntity):
     ) -> None:
         super().__init__(entry, coordinator, description.key)
         self.entity_description = description
+        self._attr_native_value = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if (restored_data := await self.async_get_last_sensor_data()) is not None:
+            if self.coordinator.values[self._key] is None and restored_data.native_value is not None:
+                self.coordinator.values[self._key] = restored_data.native_value
+                self._attr_native_value = restored_data.native_value
+        elif (last_state := await self.async_get_last_state()) is not None:
+            if last_state.state not in ("unknown", "unavailable"):
+                try:
+                    if self.entity_description.device_class == SensorDeviceClass.TIMESTAMP:
+                        val = datetime.fromisoformat(last_state.state)
+                    elif "." in last_state.state:
+                        val = float(last_state.state)
+                    else:
+                        val = int(last_state.state)
+                    if self.coordinator.values[self._key] is None:
+                        self.coordinator.values[self._key] = val
+                        self._attr_native_value = val
+                except Exception:
+                    pass
 
     @property
     def native_value(self):
-        return self.coordinator.values[self._key]
+        val = self.coordinator.values[self._key]
+        if val is not None:
+            return val
+        return self._attr_native_value
