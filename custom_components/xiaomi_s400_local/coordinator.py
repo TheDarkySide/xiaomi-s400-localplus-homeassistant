@@ -227,6 +227,13 @@ class S400Coordinator:
                     continue
                 if measurement is not None:
                     self._apply_active_measurement(measurement)
+                    if measurement.stabilized and (
+                        measurement.impedance_low is not None
+                        or measurement.impedance_high is not None
+                        or measurement.heart_rate is not None
+                    ):
+                        _LOGGER.debug("S400 measurement finalized with impedance/heart rate, concluding active GATT session")
+                        break
         except CancelledError:
             raise
         except Exception as err:
@@ -251,11 +258,12 @@ class S400Coordinator:
             self._start_measurement()
         for key in (
             "weight",
+            "heart_rate",
             "impedance_low",
             "impedance_high",
             "profile_id",
         ):
-            value = getattr(measurement, key)
+            value = getattr(measurement, key, None)
             if value is not None:
                 self.values[key] = value
         self.values["stabilized"] = measurement.stabilized

@@ -1,19 +1,24 @@
 {
   "domain": "xiaomi_s400_local",
-  "name": "Xiaomi S400 Local",
+  "name": "Xiaomi S400 Local Plus",
   "bluetooth": [
     {
       "service_data_uuid": "0000fe95-0000-1000-8000-00805f9b34fb",
       "connectable": false
     }
   ],
-  "codeowners": ["@kbpk"],
+  "codeowners": [
+    "@kbpk",
+    "@TheDarkySide"
+  ],
   "config_flow": true,
-  "dependencies": ["bluetooth_adapters"],
-  "documentation": "https://github.com/kbpk/xiaomi-s400-homeassistant#readme",
+  "dependencies": [
+    "bluetooth_adapters"
+  ],
+  "documentation": "https://github.com/TheDarkySide/xiaomi-s400-localplus-homeassistant#readme",
   "integration_type": "device",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/kbpk/xiaomi-s400-homeassistant/issues",
+  "issue_tracker": "https://github.com/TheDarkySide/xiaomi-s400-localplus-homeassistant/issues",
   "requirements": [],
-  "version": "0.3.0"
+  "version": "1.1.0-plus"
 }

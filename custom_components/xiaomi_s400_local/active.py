@@ -21,6 +21,7 @@ class ActiveMeasurement:
     timestamp: int | None = None
     impedance_low: float | None = None
     impedance_high: float | None = None
+    heart_rate: int | None = None
 
 
 class CmtpFrames:
@@ -92,6 +93,10 @@ def parse_cmtp_plaintext(plaintext: bytes) -> ActiveMeasurement | None:
     # MiBeacon frame (50 kHz); the preceding field matches the secondary frame.
     impedance_high = integer(fields[-2])
     impedance_low = integer(fields[-1])
+    # Parse heart rate if reported
+    heart_val = integer(fields[5]) if len(fields) > 5 else None
+    heart_rate = heart_val if (heart_val is not None and 35 <= heart_val <= 220) else None
+
     return ActiveMeasurement(
         weight=weight / 10 if weight is not None else None,
         stabilized=fields[4] == "1",
@@ -99,6 +104,7 @@ def parse_cmtp_plaintext(plaintext: bytes) -> ActiveMeasurement | None:
         timestamp=integer(fields[6]),
         impedance_low=(impedance_low / 10 if impedance_low is not None else None),
         impedance_high=(impedance_high / 10 if impedance_high is not None else None),
+        heart_rate=heart_rate,
     )
 
 
